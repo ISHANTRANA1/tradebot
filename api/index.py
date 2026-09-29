@@ -1,5 +1,6 @@
 """Vercel serverless entrypoint: FastAPI wrapper around the tradebot engine."""
 import sys
+from urllib.parse import parse_qs
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from tradebot.backtest import Backtester, BacktestResult  # noqa: E402
 from tradebot.config import BacktestConfig  # noqa: E402
 from tradebot.strategies import available, create  # noqa: E402
 
-app = FastAPI(title="tradebot API", description="Paper trading only. Not financial advice.")
+api = FastAPI(title="tradebot API", description="Paper trading only. Not financial advice.")
 
 
 class RunRequest(BaseModel):
@@ -49,12 +50,12 @@ def _summary(res: BacktestResult) -> dict[str, Any]:
     return {"strategy": res.strategy, "metrics": _clean(res.metrics)}
 
 
-@app.get("/api/health")
+@api.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/strategies")
+@api.get("/api/strategies")
 def strategies() -> list[dict[str, Any]]:
     return [
         {"name": n, "description": c.description, "params": vars(c())}
@@ -62,7 +63,7 @@ def strategies() -> list[dict[str, Any]]:
     ]
 
 
-@app.post("/api/backtest")
+@api.post("/api/backtest")
 def backtest(req: RunRequest) -> dict[str, Any]:
     try:
         df = data.synthetic(bars=req.bars, seed=req.seed)
@@ -82,7 +83,7 @@ def backtest(req: RunRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/api/compare")
+@api.post("/api/compare")
 def compare(req: RunRequest) -> list[dict[str, Any]]:
     try:
         df = data.synthetic(bars=req.bars, seed=req.seed)
@@ -92,3 +93,20 @@ def compare(req: RunRequest) -> list[dict[str, Any]]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     results.sort(key=lambda r: r.metrics["sharpe"], reverse=True)
     return [_summary(r) for r in results]
+
+
+class RouteFix:
+    """Vercel rewrites /api/<name> to /api/index?route=<name>; restore the original path."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].rstrip("/") in ("/api", "/api/index"):
+            route = parse_qs(scope.get("query_string", b"").decode()).get("route", [""])[0].strip("/")
+            if route:
+                scope = {**scope, "path": f"/api/{route}", "raw_path": f"/api/{route}".encode()}
+        await self.inner(scope, receive, send)
+
+
+app = RouteFix(api)  # Vercel looks for `app`
