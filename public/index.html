@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tradebot — paper trading dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;--acc:#58a6ff;--up:#3fb950;--dn:#f85149}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:18px 24px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:20px} header p{margin:2px 0 0;color:var(--mut);font-size:12px}
+  main{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px 24px;max-width:1200px;margin:auto}
+  @media(max-width:800px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  label{display:block;color:var(--mut);font-size:12px;margin:10px 0 3px}
+  input,select{width:100%;padding:7px 9px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}
+  button{width:100%;margin-top:14px;padding:9px;background:var(--acc);color:#04111f;font-weight:600;border:0;border-radius:6px;cursor:pointer}
+  button.sec{background:transparent;color:var(--acc);border:1px solid var(--acc);margin-top:8px}
+  button:disabled{opacity:.5;cursor:wait}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+  .m{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
+  .m span{display:block;color:var(--mut);font-size:11px} .m b{font-size:18px}
+  .up{color:var(--up)} .dn{color:var(--dn)}
+  table{width:100%;border-collapse:collapse;font-size:13px} th,td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left} th{color:var(--mut);font-weight:500}
+  #err{color:var(--dn);margin-top:10px;min-height:18px}
+  .desc{color:var(--mut);font-size:12px;margin-top:6px}
+  .foot{color:var(--mut);font-size:11px;text-align:center;padding:16px}
+</style>
+</head>
+<body>
+<header><h1>tradebot</h1><p>Backtest strategies on simulated market data. Paper trading only, not financial advice.</p></header>
+<main>
+  <aside class="card">
+    <label>Strategy</label><select id="strategy"></select>
+    <div class="desc" id="desc"></div>
+    <div id="params"></div>
+    <label>Bars</label><input id="bars" type="number" value="1000" min="50" max="5000">
+    <label>Random seed (changes the market)</label><input id="seed" type="number" value="42">
+    <label>Starting cash</label><input id="cash" type="number" value="10000">
+    <label>Stop-loss (0.05 = 5%, blank = none)</label><input id="stop" type="number" step="0.01" placeholder="none">
+    <button id="run">Run backtest</button>
+    <button id="cmp" class="sec">Compare all strategies</button>
+    <div id="err"></div>
+  </aside>
+  <section>
+    <div class="card" id="out"><p style="color:var(--mut)">Pick a strategy and press <b>Run backtest</b>.</p></div>
+  </section>
+</main>
+<div class="foot">Results come from generated data, so they say nothing about real markets.</div>
+<script>
+const $ = id => document.getElementById(id);
+let strategies = [], chart;
+const pct = x => (x*100).toFixed(2)+'%';
+const cls = x => x>0?'up':x<0?'dn':'';
+
+async function api(path, body){
+  const r = await fetch(path, body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {});
+  const j = await r.json();
+  if(!r.ok) throw new Error(typeof j.detail==='string' ? j.detail : 'Invalid input');
+  return j;
+}
+function renderParams(){
+  const s = strategies.find(x=>x.name===$('strategy').value);
+  $('desc').textContent = s.description;
+  $('params').innerHTML = Object.entries(s.params).map(([k,v])=>
+    `<label>${k}</label><input data-p="${k}" type="number" step="any" value="${v}">`).join('');
+}
+function payload(){
+  const params = {};
+  document.querySelectorAll('[data-p]').forEach(i=>params[i.dataset.p]=Number(i.value));
+  const stop = $('stop').value;
+  return {strategy:$('strategy').value, params, bars:+$('bars').value, seed:+$('seed').value,
+          cash:+$('cash').value, stop_loss: stop===''?null:+stop};
+}
+async function busy(fn){
+  $('err').textContent=''; $('run').disabled=$('cmp').disabled=true;
+  try{ await fn(); }catch(e){ $('err').textContent = e.message; }
+  $('run').disabled=$('cmp').disabled=false;
+}
+$('run').onclick = () => busy(async()=>{
+  const r = await api('/api/backtest', payload()), m = r.metrics;
+  const bench = r.benchmark.v.at(-1)/r.benchmark.v[0]-1;
+  const cards = [
+    ['Total return', pct(m.total_return), cls(m.total_return)], ['Buy & hold', pct(bench), cls(bench)],
+    ['CAGR', pct(m.cagr), ''], ['Sharpe', m.sharpe.toFixed(2), ''], ['Max drawdown', pct(m.max_drawdown), 'dn'],
+    ['Trades', m.trades, ''], ['Win rate', pct(m.win_rate), ''],
+    ['Final equity', m.final_equity.toLocaleString(undefined,{maximumFractionDigits:0}), '']
+  ].map(([k,v,c])=>`<div class="m"><span>${k}</span><b class="${c}">${v}</b></div>`).join('');
+  const rows = r.trades.slice(-15).reverse().map(t=>`<tr><td>${t.entry} → ${t.exit}</td><td>${t.entry_price}</td><td>${t.exit_price}</td>
+    <td class="${cls(t.pnl)}">${t.pnl.toFixed(2)}</td><td class="${cls(t.return_pct)}">${t.return_pct.toFixed(2)}%</td></tr>`).join('');
+  $('out').innerHTML = `<h3 style="margin-top:0">${r.strategy}</h3><div class="grid">${cards}</div>
+    <div style="height:300px"><canvas id="ch"></canvas></div>
+    <h4>Recent trades</h4><table><tr><th>Period</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Return</th></tr>${rows||'<tr><td colspan=5>No trades</td></tr>'}</table>`;
+  if(chart) chart.destroy();
+  chart = new Chart($('ch'), {type:'line', data:{labels:r.equity.t, datasets:[
+    {label:'Strategy', data:r.equity.v, borderColor:'#58a6ff', borderWidth:2, pointRadius:0},
+    {label:'Buy & hold', data:r.benchmark.v, borderColor:'#8b949e', borderDash:[5,4], borderWidth:1.5, pointRadius:0}]},
+    options:{maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{x:{ticks:{maxTicksLimit:8,color:'#8b949e'},grid:{color:'#21262d'}},y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}},
+      plugins:{legend:{labels:{color:'#e6edf3'}}}}});
+});
+$('cmp').onclick = () => busy(async()=>{
+  const list = await api('/api/compare', payload());
+  const rows = list.map((r,i)=>{const m=r.metrics;return `<tr><td>${i+1}. ${r.strategy}</td><td class="${cls(m.total_return)}">${pct(m.total_return)}</td>
+    <td>${m.sharpe.toFixed(2)}</td><td class="dn">${pct(m.max_drawdown)}</td><td>${m.trades}</td></tr>`}).join('');
+  $('out').innerHTML = `<h3 style="margin-top:0">All strategies, ranked by Sharpe</h3>
+    <table><tr><th>Strategy</th><th>Return</th><th>Sharpe</th><th>Max DD</th><th>Trades</th></tr>${rows}</table>`;
+});
+$('strategy').onchange = renderParams;
+api('/api/strategies').then(s=>{
+  strategies = s;
+  $('strategy').innerHTML = s.map(x=>`<option>${x.name}</option>`).join('');
+  $('strategy').value = 'sma_cross'; renderParams();
+}).catch(e=>$('err').textContent='Could not load strategies: '+e.message);
+</script>
+</body>
+</html>
